@@ -1,0 +1,14 @@
+services:
+  turbovec-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
