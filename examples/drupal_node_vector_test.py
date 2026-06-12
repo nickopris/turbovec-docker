@@ -11,8 +11,8 @@ from dataclasses import dataclass
 
 
 API_URL = "http://localhost:8000"
-INDEX_NAME = "drupal-nodes"
-DIM = 8
+COLLECTION_NAME = "drupal_nodes"
+DIM = 64
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
@@ -65,8 +65,7 @@ def vectorize(text: str) -> list[float]:
     for token in tokens(text):
         digest = hashlib.sha256(token.encode("utf-8")).digest()
         slot = digest[0] % DIM
-        sign = 1.0 if digest[1] % 2 == 0 else -1.0
-        vector[slot] += sign
+        vector[slot] += 1.0
 
     length = sum(value * value for value in vector) ** 0.5
     if length:
@@ -96,36 +95,53 @@ def request(method: str, path: str, payload: dict | None = None) -> dict | None:
 
 
 def seed() -> None:
-    request("DELETE", f"/indexes/{INDEX_NAME}")
-    request("POST", "/indexes", {"name": INDEX_NAME, "dim": DIM, "bit_width": 4})
+    request("POST", "/v2/vectordb/collections/drop", {"collectionName": COLLECTION_NAME})
+    request(
+        "POST",
+        "/v2/vectordb/collections/create",
+        {"collectionName": COLLECTION_NAME, "dimension": DIM},
+    )
     response = request(
         "POST",
-        f"/indexes/{INDEX_NAME}/vectors",
+        "/v2/vectordb/entities/insert",
         {
-            "ids": [node.nid for node in NODES],
-            "vectors": [vectorize(node.text) for node in NODES],
+            "collectionName": COLLECTION_NAME,
+            "data": [
+                {
+                    "id": node.nid,
+                    "title": node.title,
+                    "body": node.body,
+                    "tokens": tokens(node.text),
+                    "vector": vectorize(node.text),
+                }
+                for node in NODES
+            ],
         },
     )
     print(json.dumps(response, indent=2))
 
 
 def search(query: str, k: int) -> None:
-    by_id = {node.nid: node for node in NODES}
     query_tokens = tokens(query)
     response = request(
         "POST",
-        f"/indexes/{INDEX_NAME}/search",
-        {"query": vectorize(query), "k": k},
+        "/v2/vectordb/entities/search",
+        {
+            "collectionName": COLLECTION_NAME,
+            "data": [vectorize(query)],
+            "limit": k,
+            "outputFields": ["title", "tokens"],
+        },
     )
     if response is None:
-        raise RuntimeError(f"Index '{INDEX_NAME}' does not exist. Run with --seed first.")
+        raise RuntimeError(f"Collection '{COLLECTION_NAME}' does not exist. Run with --seed first.")
 
     print(f"query: {query}")
     print(f"tokens: {query_tokens}")
-    for rank, (score, nid) in enumerate(zip(response["scores"][0], response["ids"][0]), start=1):
-        node = by_id.get(nid)
-        title = node.title if node else "<unknown>"
-        print(f"{rank}. nid={nid} score={score:.4f} title={title}")
+    for rank, hit in enumerate(response["data"][0], start=1):
+        entity = hit["entity"]
+        print(f"{rank}. nid={hit['id']} score={hit['distance']:.4f} title={entity.get('title')}")
+        print(f"   matched node tokens: {entity.get('tokens')}")
 
 
 def main() -> None:

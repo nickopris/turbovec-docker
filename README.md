@@ -15,6 +15,12 @@ The API listens on `http://localhost:8000`. Index files are written to `./data` 
 ## Endpoints
 
 - `GET /health`
+- `POST /v2/vectordb/collections/create`
+- `POST /v2/vectordb/collections/list`
+- `POST /v2/vectordb/collections/describe`
+- `POST /v2/vectordb/collections/drop`
+- `POST /v2/vectordb/entities/insert`
+- `POST /v2/vectordb/entities/search`
 - `POST /indexes`
 - `GET /indexes`
 - `GET /indexes/{name}`
@@ -78,9 +84,58 @@ Delete a vector:
 curl -X DELETE http://localhost:8000/indexes/demo/vectors/102
 ```
 
+## Vector database API
+
+The `/v2/vectordb/...` routes provide a small collection/entity layer over turbovec. It gives you a familiar testing shape for create, insert, and search flows without tying the codebase to a specific vendor API.
+
+Create a collection:
+
+```bash
+curl -X POST http://localhost:8000/v2/vectordb/collections/create \
+  -H 'content-type: application/json' \
+  -d '{"collectionName":"drupal_nodes","dimension":8}'
+```
+
+Insert entities. The `id` can be your Drupal node id, `vector` is the indexed vector, and every other field is stored as metadata:
+
+```bash
+curl -X POST http://localhost:8000/v2/vectordb/entities/insert \
+  -H 'content-type: application/json' \
+  -d '{
+    "collectionName": "drupal_nodes",
+    "data": [
+      {
+        "id": 1001,
+        "title": "Regional food in Italy",
+        "body": "Pasta, risotto, olive oil, tomatoes, pizza, parmesan and Tuscan cooking.",
+        "vector": [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]
+      },
+      {
+        "id": 1002,
+        "title": "European car makers",
+        "body": "Ferrari, Fiat, Alfa Romeo, BMW, Mercedes, Porsche and electric vehicles.",
+        "vector": [0.8,0.7,0.6,0.5,0.4,0.3,0.2,0.1]
+      }
+    ]
+  }'
+```
+
+Search entities and request metadata back with `outputFields`:
+
+```bash
+curl -X POST http://localhost:8000/v2/vectordb/entities/search \
+  -H 'content-type: application/json' \
+  -d '{
+    "collectionName": "drupal_nodes",
+    "data": [[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]],
+    "limit": 2,
+    "outputFields": ["title", "body"]
+  }'
+```
+
 ## Drupal-style node test data
 
-The API stores vectors by stable `uint64` ids. For Drupal content, use the Drupal node id (`nid`) as the vector id, and keep metadata such as title, body, type, or URL in your caller or test fixture.
+The API stores vectors by stable `uint64` ids. For Drupal content, use the Drupal node id (`nid`) as the entity `id`, and store metadata such as title, body, type, or URL as fields on the entity.
 
 This repo includes a small stdlib-only test script with five fake nodes:
 
@@ -112,7 +167,7 @@ python3 examples/drupal_node_vector_test.py espresso beans grinder
 python3 examples/drupal_node_vector_test.py solar battery wind
 ```
 
-The example lowercases text, extracts `[a-z0-9]+` tokens, hashes each token into an 8-dimensional vector, then sends that vector to `/indexes/drupal-nodes/search`. It is intentionally simple test machinery rather than production embeddings.
+The example lowercases text, extracts `[a-z0-9]+` tokens, hashes each token into a 64-dimensional count vector, then sends that vector to `/v2/vectordb/entities/search`. It is intentionally simple test machinery rather than production embeddings.
 
 ## Notes
 

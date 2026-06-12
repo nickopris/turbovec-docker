@@ -6,7 +6,7 @@ import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Path as ApiPath, Response, status
@@ -24,6 +24,24 @@ def index_path(name: str) -> Path:
 
 def metadata_path(name: str) -> Path:
     return DATA_DIR / f"{name}.json"
+
+
+def load_metadata(name: str) -> dict[str, Any]:
+    path = metadata_path(name)
+    if not path.exists():
+        return {"records": {}}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"records": {}}
+
+    records = {}
+    for key, value in raw.get("records", {}).items():
+        try:
+            records[int(key)] = value
+        except ValueError:
+            continue
+    return {"records": records}
 
 
 def validate_name(name: str) -> str:
@@ -125,11 +143,62 @@ class SearchResponse(BaseModel):
     ids: list[list[int]]
 
 
+class VectorDbCreateCollectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    collectionName: str
+    dimension: int = Field(ge=8, le=65536)
+    bitWidth: Literal[2, 3, 4] = 4
+
+    @field_validator("collectionName")
+    @classmethod
+    def collection_name_is_safe(cls, value: str) -> str:
+        if not NAME_RE.fullmatch(value):
+            raise ValueError("Use 1-64 characters: letters, numbers, dots, underscores, or hyphens.")
+        return value
+
+    @field_validator("dimension")
+    @classmethod
+    def dimension_is_multiple_of_8(cls, value: int) -> int:
+        if value % 8 != 0:
+            raise ValueError("dimension must be a positive multiple of 8.")
+        return value
+
+
+class VectorDbCollectionNameRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    collectionName: str
+
+
+class VectorDbInsertRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    collectionName: str
+    data: list[dict[str, Any]] = Field(min_length=1)
+
+
+class VectorDbSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    collectionName: str
+    data: list[list[float]] = Field(min_length=1)
+    limit: int = Field(default=10, ge=1, le=1000)
+    outputFields: list[str] | None = None
+    filterIds: list[int] | None = None
+
+
+class VectorDbResponse(BaseModel):
+    code: int = 0
+    data: Any = None
+
+
 @dataclass
 class ManagedIndex:
     name: str
     index: IdMapIndex
     lock: threading.RLock
+    records: dict[int, dict[str, Any]]
 
     def info(self) -> IndexInfo:
         return IndexInfo(
@@ -144,7 +213,15 @@ class ManagedIndex:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.index.write(str(index_path(self.name)))
         metadata_path(self.name).write_text(
-            json.dumps({"name": self.name, "kind": "IdMapIndex"}, indent=2) + "\n",
+            json.dumps(
+                {
+                    "name": self.name,
+                    "kind": "IdMapIndex",
+                    "records": {str(key): value for key, value in sorted(self.records.items())},
+                },
+                indent=2,
+            )
+            + "\n",
             encoding="utf-8",
         )
 
@@ -161,10 +238,12 @@ class IndexRegistry:
                 name = path.stem
                 if not NAME_RE.fullmatch(name):
                     continue
+                metadata = load_metadata(name)
                 self._indexes[name] = ManagedIndex(
                     name=name,
                     index=IdMapIndex.load(str(path)),
                     lock=threading.RLock(),
+                    records=metadata.get("records", {}),
                 )
 
     def create(self, request: CreateIndexRequest) -> ManagedIndex:
@@ -175,6 +254,7 @@ class IndexRegistry:
                 name=request.name,
                 index=IdMapIndex(dim=request.dim, bit_width=request.bit_width),
                 lock=threading.RLock(),
+                records={},
             )
             idx.save()
             self._indexes[request.name] = idx
@@ -218,6 +298,118 @@ def startup() -> None:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/v2/vectordb/collections/create", response_model=VectorDbResponse)
+def vectordb_create_collection(request: VectorDbCreateCollectionRequest) -> VectorDbResponse:
+    idx = registry.create(
+        CreateIndexRequest(
+            name=request.collectionName,
+            dim=request.dimension,
+            bit_width=request.bitWidth,
+        )
+    )
+    return VectorDbResponse(data=idx.info().model_dump())
+
+
+@app.post("/v2/vectordb/collections/list", response_model=VectorDbResponse)
+def vectordb_list_collections() -> VectorDbResponse:
+    return VectorDbResponse(
+        data=[
+            {
+                "name": item.name,
+                "dimension": item.dim,
+                "numEntities": item.size,
+            }
+            for item in registry.list()
+        ]
+    )
+
+
+@app.post("/v2/vectordb/collections/describe", response_model=VectorDbResponse)
+def vectordb_describe_collection(request: VectorDbCollectionNameRequest) -> VectorDbResponse:
+    idx = registry.get(request.collectionName)
+    info = idx.info()
+    return VectorDbResponse(
+        data={
+            "collectionName": info.name,
+            "dimension": info.dim,
+            "numEntities": info.size,
+            "bitWidth": info.bit_width,
+        }
+    )
+
+
+@app.post("/v2/vectordb/collections/drop", response_model=VectorDbResponse)
+def vectordb_drop_collection(request: VectorDbCollectionNameRequest) -> VectorDbResponse:
+    registry.delete(request.collectionName)
+    return VectorDbResponse(data={})
+
+
+@app.post("/v2/vectordb/entities/insert", response_model=VectorDbResponse)
+def vectordb_insert_entities(request: VectorDbInsertRequest) -> VectorDbResponse:
+    idx = registry.get(request.collectionName)
+    ids: list[int] = []
+    vectors: list[list[float]] = []
+    records: dict[int, dict[str, Any]] = {}
+
+    for row in request.data:
+        if "id" not in row:
+            raise HTTPException(status_code=422, detail="Each entity must include an id field.")
+        if "vector" not in row:
+            raise HTTPException(status_code=422, detail="Each entity must include a vector field.")
+        try:
+            entity_id = int(row["id"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="Entity id must be an unsigned 64-bit integer.") from exc
+        ids.append(entity_id)
+        vectors.append(row["vector"])
+        records[entity_id] = {key: value for key, value in row.items() if key != "vector"}
+
+    vector_matrix = as_float32_matrix(vectors, "data.vector")
+    id_array = as_uint64_array(ids, "data.id")
+    if len(set(ids)) != len(ids):
+        raise HTTPException(status_code=422, detail="Entity ids must be unique within an insert request.")
+
+    try:
+        with idx.lock:
+            idx.index.add_with_ids(vector_matrix, id_array)
+            idx.records.update(records)
+            idx.save()
+            size = len(idx.index)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return VectorDbResponse(data={"insertCount": len(ids), "ids": ids, "numEntities": size})
+
+
+@app.post("/v2/vectordb/entities/search", response_model=VectorDbResponse)
+def vectordb_search_entities(request: VectorDbSearchRequest) -> VectorDbResponse:
+    idx = registry.get(request.collectionName)
+    matrix = as_float32_matrix(request.data, "data")
+    allowlist = as_uint64_array(request.filterIds, "filterIds") if request.filterIds is not None else None
+
+    try:
+        with idx.lock:
+            scores, ids = idx.index.search(matrix, request.limit, allowlist=allowlist)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown filter id: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    output_fields = request.outputFields
+    results = []
+    for result_scores, result_ids in zip(scores.astype(float).tolist(), ids.astype(object).tolist()):
+        hits = []
+        for score, entity_id in zip(result_scores, result_ids):
+            record = idx.records.get(entity_id, {"id": entity_id})
+            entity = dict(record)
+            if output_fields is not None:
+                entity = {field: entity[field] for field in output_fields if field in entity}
+            hits.append({"id": entity_id, "distance": score, "entity": entity})
+        results.append(hits)
+
+    return VectorDbResponse(data=results)
 
 
 @app.post("/indexes", response_model=IndexInfo, status_code=201)
@@ -291,6 +483,7 @@ def remove_vector(name: Annotated[str, ApiPath()], vector_id: Annotated[int, Api
             removed = idx.index.remove(vector_id)
             if not removed:
                 raise HTTPException(status_code=404, detail=f"Vector id {vector_id} was not found.")
+            idx.records.pop(vector_id, None)
             idx.save()
     except OverflowError as exc:
         raise HTTPException(status_code=422, detail="vector_id must fit in uint64.") from exc
