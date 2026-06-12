@@ -143,7 +143,7 @@ class SearchResponse(BaseModel):
     ids: list[list[int]]
 
 
-class VectorDbCreateCollectionRequest(BaseModel):
+class CreateCollectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     collectionName: str
@@ -165,20 +165,20 @@ class VectorDbCreateCollectionRequest(BaseModel):
         return value
 
 
-class VectorDbCollectionNameRequest(BaseModel):
+class CollectionNameRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     collectionName: str
 
 
-class VectorDbInsertRequest(BaseModel):
+class InsertEntitiesRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     collectionName: str
     data: list[dict[str, Any]] = Field(min_length=1)
 
 
-class VectorDbSearchRequest(BaseModel):
+class SearchEntitiesRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     collectionName: str
@@ -188,7 +188,7 @@ class VectorDbSearchRequest(BaseModel):
     filterIds: list[int] | None = None
 
 
-class VectorDbResponse(BaseModel):
+class ApiResponse(BaseModel):
     code: int = 0
     data: Any = None
 
@@ -300,8 +300,8 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/v2/vectordb/collections/create", response_model=VectorDbResponse)
-def vectordb_create_collection(request: VectorDbCreateCollectionRequest) -> VectorDbResponse:
+@app.post("/v2/vectordb/collections/create", response_model=ApiResponse)
+def vectordb_create_collection(request: CreateCollectionRequest) -> ApiResponse:
     idx = registry.create(
         CreateIndexRequest(
             name=request.collectionName,
@@ -309,12 +309,12 @@ def vectordb_create_collection(request: VectorDbCreateCollectionRequest) -> Vect
             bit_width=request.bitWidth,
         )
     )
-    return VectorDbResponse(data=idx.info().model_dump())
+    return ApiResponse(data=idx.info().model_dump())
 
 
-@app.post("/v2/vectordb/collections/list", response_model=VectorDbResponse)
-def vectordb_list_collections() -> VectorDbResponse:
-    return VectorDbResponse(
+@app.post("/v2/vectordb/collections/list", response_model=ApiResponse)
+def vectordb_list_collections() -> ApiResponse:
+    return ApiResponse(
         data=[
             {
                 "name": item.name,
@@ -326,11 +326,11 @@ def vectordb_list_collections() -> VectorDbResponse:
     )
 
 
-@app.post("/v2/vectordb/collections/describe", response_model=VectorDbResponse)
-def vectordb_describe_collection(request: VectorDbCollectionNameRequest) -> VectorDbResponse:
+@app.post("/v2/vectordb/collections/describe", response_model=ApiResponse)
+def vectordb_describe_collection(request: CollectionNameRequest) -> ApiResponse:
     idx = registry.get(request.collectionName)
     info = idx.info()
-    return VectorDbResponse(
+    return ApiResponse(
         data={
             "collectionName": info.name,
             "dimension": info.dim,
@@ -340,14 +340,14 @@ def vectordb_describe_collection(request: VectorDbCollectionNameRequest) -> Vect
     )
 
 
-@app.post("/v2/vectordb/collections/drop", response_model=VectorDbResponse)
-def vectordb_drop_collection(request: VectorDbCollectionNameRequest) -> VectorDbResponse:
+@app.post("/v2/vectordb/collections/drop", response_model=ApiResponse)
+def vectordb_drop_collection(request: CollectionNameRequest) -> ApiResponse:
     registry.delete(request.collectionName)
-    return VectorDbResponse(data={})
+    return ApiResponse(data={})
 
 
-@app.post("/v2/vectordb/entities/insert", response_model=VectorDbResponse)
-def vectordb_insert_entities(request: VectorDbInsertRequest) -> VectorDbResponse:
+@app.post("/v2/vectordb/entities/insert", response_model=ApiResponse)
+def vectordb_insert_entities(request: InsertEntitiesRequest) -> ApiResponse:
     idx = registry.get(request.collectionName)
     ids: list[int] = []
     vectors: list[list[float]] = []
@@ -380,11 +380,11 @@ def vectordb_insert_entities(request: VectorDbInsertRequest) -> VectorDbResponse
     except (ValueError, KeyError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    return VectorDbResponse(data={"insertCount": len(ids), "ids": ids, "numEntities": size})
+    return ApiResponse(data={"insertCount": len(ids), "ids": ids, "numEntities": size})
 
 
-@app.post("/v2/vectordb/entities/search", response_model=VectorDbResponse)
-def vectordb_search_entities(request: VectorDbSearchRequest) -> VectorDbResponse:
+@app.post("/v2/vectordb/entities/search", response_model=ApiResponse)
+def vectordb_search_entities(request: SearchEntitiesRequest) -> ApiResponse:
     idx = registry.get(request.collectionName)
     matrix = as_float32_matrix(request.data, "data")
     allowlist = as_uint64_array(request.filterIds, "filterIds") if request.filterIds is not None else None
@@ -409,7 +409,7 @@ def vectordb_search_entities(request: VectorDbSearchRequest) -> VectorDbResponse
             hits.append({"id": entity_id, "distance": score, "entity": entity})
         results.append(hits)
 
-    return VectorDbResponse(data=results)
+    return ApiResponse(data=results)
 
 
 @app.post("/indexes", response_model=IndexInfo, status_code=201)
