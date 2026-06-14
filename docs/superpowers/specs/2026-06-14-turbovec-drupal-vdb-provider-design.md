@@ -317,10 +317,122 @@ Vector search query
 
 ---
 
+---
+
+## Part 3: Tests
+
+### Strategy
+
+A live turbovec-api server is not available in CI, so tests use a **mocked Guzzle client** to simulate HTTP responses. A deterministic bag-of-words vectorizer (SHA-256 token hashing into a fixed-dimension float vector — same algorithm as `examples/drupal_node_vector_test.py`) is used in place of a real embedding model. This makes the "search for a keyword similar to the topic" assertion meaningful without any external dependencies.
+
+Two test classes live in `tests/src/Unit/`:
+
+```
+tests/
+└── src/
+    └── Unit/
+        ├── TurbovecClientTest.php
+        └── TurbovecProviderIndexAndSearchTest.php
+```
+
+---
+
+### `TurbovecClientTest.php`
+
+`@coversDefaultClass \Drupal\ai_vdb_provider_turbovec\TurbovecClient`
+
+Mocks `\GuzzleHttp\Client`. Verifies that each client method sends the correct JSON body to the correct endpoint path.
+
+| Test method | What it asserts |
+|---|---|
+| `testCreateCollection()` | POST to `collections/create` with `collectionName` and `dimension` |
+| `testListCollections()` | POST to `collections/list` with empty body `{}` |
+| `testDropCollection()` | POST to `collections/drop` with `collectionName` |
+| `testInsertIntoCollection()` | POST to `entities/insert` with `collectionName` and `data` array |
+| `testDeleteFromCollection()` | POST to `entities/delete` with `collectionName` and `filter` containing the IDs |
+| `testSearch()` | POST to `entities/search` with `collectionName`, `data`, `outputFields`, `limit`, `offset`; when `filterIds` non-empty, includes `filterIds` in body |
+| `testQuery()` | POST to `entities/query` with `collectionName`, `filter` dict, `outputFields`, `limit`, `offset` |
+| `testBearerTokenHeader()` | When `setApiKey()` is called, request includes `Authorization: Bearer {token}` header |
+| `testNoAuthHeader()` | When no API key set, no `Authorization` header is sent |
+| `testPortInUrl()` | URL is constructed as `{server}:{port}/v2/vectordb/{path}` |
+
+---
+
+### `TurbovecProviderIndexAndSearchTest.php`
+
+`@coversDefaultClass \Drupal\ai_vdb_provider_turbovec\Plugin\VdbProvider\TurbovecProvider`
+
+This is the core semantic search test. It simulates the full index → search cycle using the bag-of-words vectorizer and a mocked HTTP client that stores inserted records in memory and returns plausible search results.
+
+**Vectorizer (helper method):**
+
+```php
+private function vectorize(string $text, int $dim = 64): array {
+    $vector = array_fill(0, $dim, 0.0);
+    preg_match_all('/[a-z0-9]+/', strtolower($text), $matches);
+    foreach ($matches[0] as $token) {
+        $digest = hash('sha256', $token, true);
+        $slot = ord($digest[0]) % $dim;
+        $vector[$slot] += 1.0;
+    }
+    $length = sqrt(array_sum(array_map(fn($v) => $v * $v, $vector)));
+    if ($length > 0) {
+        $vector = array_map(fn($v) => round($v / $length, 6), $vector);
+    }
+    return $vector;
+}
+```
+
+**Sample nodes (same topics as `drupal_node_vector_test.py`):**
+
+```php
+$nodes = [
+    ['id' => 1001, 'title' => 'Regional food in Italy',    'body' => 'Pasta, risotto, olive oil, tomatoes, pizza, parmesan and Tuscan cooking.'],
+    ['id' => 1002, 'title' => 'European car makers',        'body' => 'Ferrari, Fiat, Alfa Romeo, BMW, Mercedes, Porsche and electric vehicles.'],
+    ['id' => 1003, 'title' => 'Single malt whisky',         'body' => 'Scotch whisky, bourbon barrels, peat smoke, Islay distilleries and oak casks.'],
+    ['id' => 1004, 'title' => 'Coffee brewing methods',     'body' => 'Espresso, filter coffee, grinders, beans, roast levels and cafe equipment.'],
+    ['id' => 1005, 'title' => 'Renewable energy projects',  'body' => 'Solar panels, wind farms, batteries, grid storage and clean electricity.'],
+];
+```
+
+**Mock HTTP client behaviour:**
+
+The mock Guzzle client is configured with a callable handler that:
+1. On `entities/insert`: stores the posted records in a local `$store` array (keyed by `id`).
+2. On `entities/search`: computes cosine similarity between the query vector and all stored `vector` fields, returns the top-k hits sorted by score, formatted as `{"code":0,"data":[[{id, distance, entity}]]}`.
+3. On `entities/query`: filters `$store` by the `filter` dict, returns matching records.
+4. On other endpoints: returns `{"code":0,"data":{}}`.
+
+**Test methods:**
+
+`testIndexAndSearchByKeyword()` — the primary semantic test:
+1. Calls `insertIntoCollection()` for each node with its bag-of-words vector and metadata fields (`title`, `body`, `drupal_entity_id`).
+2. Searches with query `"pasta pizza italy"` → asserts node 1001 ("Regional food in Italy") is the top result.
+3. Searches with query `"solar wind electricity"` → asserts node 1005 ("Renewable energy projects") is the top result.
+4. Searches with query `"whisky scotch peat"` → asserts node 1003 ("Single malt whisky") is the top result.
+
+`testQuerySearchByEntityId()`:
+1. After indexing, calls `querySearch()` with `filter = ['drupal_entity_id' => ['node:1002:en']]`.
+2. Asserts the result contains exactly one record with the car makers node.
+
+`testDeleteRemovesFromResults()`:
+1. After indexing, calls `deleteFromCollection()` with `drupal_entity_id = ['node:1004:en']`.
+2. Verifies the mock received a delete request containing the resolved turbovec ID (1004).
+
+`testPrepareFiltersBuildsCorrectArray()`:
+1. Constructs a mock `QueryInterface` with conditions `drupal_entity_id = 'node:1001:en'` and `drupal_entity_id IN ['node:1002:en', 'node:1003:en']`.
+2. Calls `prepareFilters()` and asserts the returned array has the correct shape.
+
+`testVectorSearchPassesFilterIdsAsAllowlist()`:
+1. Calls `vectorSearch()` with a non-empty filter array.
+2. Asserts the mock HTTP client received a `entities/search` request whose body contains a `filterIds` key with the resolved IDs.
+
+---
+
 ## Out of Scope
 
 - Multi-value / array metadata field filtering (Milvus `JSON_CONTAINS_ALL` equivalent)
 - Milvus-style filter expression language
 - Database/namespace partitioning
 - Zilliz cloud support
-- Unit tests (can be added later following Milvus provider test patterns)
+- Functional/browser tests (require live turbovec-api and Drupal install; can follow `AiSearchSetupMySqlTest` pattern later)
