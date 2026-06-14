@@ -201,8 +201,16 @@ class SearchEntitiesRequest(BaseModel):
     collectionName: str
     data: list[list[float]] = Field(min_length=1)
     limit: int = Field(default=10, ge=1, le=1000)
+    offset: int = Field(default=0, ge=0)
     outputFields: list[str] | None = None
     filterIds: list[int] | None = None
+
+
+class DeleteEntitiesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    collectionName: str
+    filter: str
 
 
 class QueryEntitiesRequest(BaseModel):
@@ -417,9 +425,10 @@ def vectordb_search_entities(request: SearchEntitiesRequest) -> ApiResponse:
     matrix = as_float32_matrix(request.data, "data")
     allowlist = as_uint64_array(request.filterIds, "filterIds") if request.filterIds is not None else None
 
+    fetch = request.offset + request.limit
     try:
         with idx.lock:
-            scores, ids = idx.index.search(matrix, request.limit, allowlist=allowlist)
+            scores, ids = idx.index.search(matrix, fetch, allowlist=allowlist)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown filter id: {exc}") from exc
     except ValueError as exc:
@@ -435,9 +444,35 @@ def vectordb_search_entities(request: SearchEntitiesRequest) -> ApiResponse:
             if output_fields is not None:
                 entity = {field: entity[field] for field in output_fields if field in entity}
             hits.append({"id": entity_id, "distance": score, "entity": entity})
-        results.append(hits)
+        results.append(hits[request.offset:])
 
     return ApiResponse(data=results)
+
+
+@app.post("/v2/vectordb/entities/delete", response_model=ApiResponse)
+def vectordb_delete_entities(request: DeleteEntitiesRequest) -> ApiResponse:
+    idx = registry.get(request.collectionName)
+
+    match = re.search(r'id\s+in\s*\[([^\]]*)\]', request.filter, re.IGNORECASE)
+    if not match:
+        raise HTTPException(status_code=422, detail="filter must be in the form 'id in [1,2,3]'")
+
+    ids = [int(x.strip()) for x in match.group(1).split(',') if x.strip()]
+    if not ids:
+        return ApiResponse(data={"deleteCount": 0})
+
+    uint64_ids = as_uint64_array(ids, "filter ids")
+    deleted = 0
+    with idx.lock:
+        for uid in uint64_ids:
+            if uid in idx.records:
+                del idx.records[uid]
+                idx.index.remove(int(uid))
+                deleted += 1
+        if deleted:
+            idx.save()
+
+    return ApiResponse(data={"deleteCount": deleted})
 
 
 @app.post("/v2/vectordb/entities/query", response_model=ApiResponse)
