@@ -3,19 +3,23 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Path as ApiPath, Response, status
+from fastapi import FastAPI, HTTPException, Path as ApiPath, Response, Security, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from turbovec import IdMapIndex
 
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
+API_BEARER_TOKEN = os.getenv("API_BEARER_TOKEN") or None
 NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def index_path(name: str) -> Path:
@@ -24,6 +28,19 @@ def index_path(name: str) -> Path:
 
 def metadata_path(name: str) -> Path:
     return DATA_DIR / f"{name}.json"
+
+
+def require_bearer_token(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Security(bearer_scheme)],
+) -> None:
+    if API_BEARER_TOKEN is None:
+        return
+    if credentials is None or not secrets.compare_digest(credentials.credentials, API_BEARER_TOKEN):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing bearer token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 def load_metadata(name: str) -> dict[str, Any]:
@@ -188,6 +205,16 @@ class SearchEntitiesRequest(BaseModel):
     filterIds: list[int] | None = None
 
 
+class QueryEntitiesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    collectionName: str
+    filter: dict[str, list[Any]] = Field(default_factory=dict)
+    outputFields: list[str] | None = None
+    limit: int = Field(default=100, ge=1, le=10000)
+    offset: int = Field(default=0, ge=0)
+
+
 class ApiResponse(BaseModel):
     code: int = 0
     data: Any = None
@@ -287,6 +314,7 @@ app = FastAPI(
     title="turbovec API",
     summary="A small HTTP service for RyanCodrai/turbovec's IdMapIndex.",
     version="0.1.0",
+    dependencies=[Security(require_bearer_token)],
 )
 
 
@@ -410,6 +438,35 @@ def vectordb_search_entities(request: SearchEntitiesRequest) -> ApiResponse:
         results.append(hits)
 
     return ApiResponse(data=results)
+
+
+@app.post("/v2/vectordb/entities/query", response_model=ApiResponse)
+def vectordb_query_entities(request: QueryEntitiesRequest) -> ApiResponse:
+    idx = registry.get(request.collectionName)
+
+    def matches(record: dict[str, Any]) -> bool:
+        for field, allowed in request.filter.items():
+            val = str(record.get(field, ""))
+            if val not in [str(a) for a in allowed]:
+                return False
+        return True
+
+    results = []
+    with idx.lock:
+        for record_id, record in idx.records.items():
+            if not matches(record):
+                continue
+            entry: dict[str, Any] = {"id": record_id}
+            if request.outputFields is None:
+                entry.update(record)
+            else:
+                for field in request.outputFields:
+                    if field in record:
+                        entry[field] = record[field]
+            results.append(entry)
+
+    paginated = results[request.offset : request.offset + request.limit]
+    return ApiResponse(data=paginated)
 
 
 @app.post("/indexes", response_model=IndexInfo, status_code=201)
