@@ -163,8 +163,9 @@ ai_vdb_provider_turbovec.settings_menu:
 ```yaml
 api_key: ''
 server: ''
-port: null
 ```
+
+`port` is omitted from the install config — Drupal rejects `null` for a schema-typed `integer`. The provider derives the default port from the server URL scheme at runtime (443 for https, 80 for http).
 
 ---
 
@@ -199,7 +200,7 @@ Guzzle-based HTTP client. Constructor takes `\GuzzleHttp\Client`. Public methods
 | `dropCollection(string $name)` | `POST /v2/vectordb/collections/drop` |
 | `insertIntoCollection(string $name, array $data): array` | `POST /v2/vectordb/entities/insert` |
 | `deleteFromCollection(string $name, array $ids): array` | `POST /v2/vectordb/entities/delete` |
-| `search(string $name, array $vector, array $outputFields, int $limit, int $offset, array $filterIds = []): array` | `POST /v2/vectordb/entities/search` |
+| `search(string $name, array $vector, array $outputFields, int $limit, int $offset, array $filterIds = []): array` | `POST /v2/vectordb/entities/search` — `filterIds` maps to `"filterIds"` in the request body (array of uint64 ints); omitted when empty |
 | `query(string $name, array $outputFields, array $filter = [], int $limit, int $offset): array` | `POST /v2/vectordb/entities/query` |
 
 Private `makeRequest(string $path, string $method, mixed $body): array` handles:
@@ -250,13 +251,13 @@ Calls `getClient()->createCollection($collection_name, $dimension)`. Metric type
 Calls `getClient()->dropCollection($collection_name)`.
 
 **`getCollections(string $database): array`**
-Calls `getClient()->listCollections()`, returns `$result['data'] ?? []`.
+Calls `getClient()->listCollections()`, returns the full response array (e.g. `['code' => 0, 'data' => ['col1', 'col2']]`). The base class `validateSettingsForm()` accesses `$collections['data']` directly, so the full envelope must be returned — not just `$result['data']`.
 
 **`insertIntoCollection(string $collection_name, array $data, string $database): void`**
 Calls `getClient()->insertIntoCollection($collection_name, $data)`. Checks response `code` is `0`.
 
 **`deleteFromCollection(string $collection_name, array $ids, string $database): void`**
-Calls `getClient()->deleteFromCollection($collection_name, $ids)`.
+`$ids` are Drupal entity ID strings, not turbovec uint64 IDs. Must first call `getVdbIds($collection_name, $ids)` to resolve them to turbovec integer IDs, then call `getClient()->deleteFromCollection($collection_name, $resolvedIds)`. If `$resolvedIds` is empty, return early without calling the API.
 
 **`prepareFilters(QueryInterface $query): mixed`**
 Returns a `['field' => [values]]` PHP array. The interface declares return type `mixed` (confirmed from `AiVdbProviderSearchApiInterface`) so returning an array is valid — Pinecone provider does the same.
@@ -272,8 +273,8 @@ Calls `getClient()->query($collection_name, $output_fields, (array) $filters, $l
 Returns `$result['data'] ?? []`.
 
 **`vectorSearch(string $collection_name, array $vector_input, array $output_fields, QueryInterface $query, mixed $filters, int $limit, int $offset, string $database): array`**
-Calls `getClient()->search($collection_name, $vector_input, $output_fields, $limit, $offset)`.
-Returns `$result['data'][0] ?? []` (turbovec returns `data` as array of result sets, one per query vector).
+If `$filters` is a non-empty array, first resolve it to a set of turbovec integer IDs by calling `querySearch($collection_name, ['id'], $filters, 16384, 0)` and extracting the `id` values — these become the `filterIds` allowlist. Then call `getClient()->search($collection_name, $vector_input, $output_fields, $limit, $offset, $filterIds)`.
+Returns `$result['data'][0] ?? []` (turbovec wraps results in an outer array, one entry per query vector; we always send one vector).
 
 **`getVdbIds(string $collection_name, array $drupalIds, string $database): array`**
 Calls `querySearch()` with `filter = ['drupal_entity_id' => $drupalIds]`, `output_fields = ['id']`, `limit = 16384`.
