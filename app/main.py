@@ -444,26 +444,30 @@ def vectordb_search_entities(request: SearchEntitiesRequest) -> ApiResponse:
 def vectordb_query_entities(request: QueryEntitiesRequest) -> ApiResponse:
     idx = registry.get(request.collectionName)
 
+    str_filter = {field: {str(a) for a in vals} for field, vals in request.filter.items()}
+
     def matches(record: dict[str, Any]) -> bool:
-        for field, allowed in request.filter.items():
+        for field, allowed_set in str_filter.items():
             val = str(record.get(field, ""))
-            if val not in [str(a) for a in allowed]:
+            if val not in allowed_set:
                 return False
         return True
 
-    results = []
     with idx.lock:
-        for record_id, record in idx.records.items():
-            if not matches(record):
-                continue
-            entry: dict[str, Any] = {"id": record_id}
-            if request.outputFields is None:
-                entry.update(record)
-            else:
-                for field in request.outputFields:
-                    if field in record:
-                        entry[field] = record[field]
-            results.append(entry)
+        snapshot = dict(idx.records)
+
+    results = []
+    for record_id, record in snapshot.items():
+        if not matches(record):
+            continue
+        entry: dict[str, Any] = {"id": record_id}
+        if request.outputFields is None:
+            entry.update(record)
+        else:
+            for field in request.outputFields:
+                if field in record:
+                    entry[field] = record[field]
+        results.append(entry)
 
     paginated = results[request.offset : request.offset + request.limit]
     return ApiResponse(data=paginated)
