@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import urllib.error
 import urllib.request
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 
 
 API_URL = "http://localhost:8000"
+API_BEARER_TOKEN = os.getenv("API_BEARER_TOKEN")
 COLLECTION_NAME = "drupal_nodes"
 DIM = 64
 TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -79,6 +81,8 @@ def request(method: str, path: str, payload: dict | None = None) -> dict | None:
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["content-type"] = "application/json"
+    if API_BEARER_TOKEN:
+        headers["authorization"] = f"Bearer {API_BEARER_TOKEN}"
 
     req = urllib.request.Request(f"{API_URL}{path}", data=data, headers=headers, method=method)
     try:

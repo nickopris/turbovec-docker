@@ -5,10 +5,17 @@ services:
       - "8000:8000"
     environment:
       DATA_DIR: /data
+      API_BEARER_TOKEN: ${API_BEARER_TOKEN:-}
     volumes:
       - ./data:/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os, urllib.request; req = urllib.request.Request('http://127.0.0.1:8000/health'); token = os.getenv('API_BEARER_TOKEN'); req.add_header('Authorization', f'Bearer {token}') if token else None; urllib.request.urlopen(req).read()",
+        ]
       interval: 10s
       timeout: 3s
       retries: 5

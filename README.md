@@ -12,6 +12,29 @@ docker compose up --build
 
 The API listens on `http://localhost:8000`. Index files are written to `./data` as `.tvim` files and reloaded on startup.
 
+## Authentication
+
+Authentication is optional. If `API_BEARER_TOKEN` is set, every API route requires:
+
+```text
+Authorization: Bearer <token>
+```
+
+Run with auth enabled:
+
+```bash
+API_BEARER_TOKEN=dev-secret docker compose up --build
+```
+
+Then include the header in requests:
+
+```bash
+curl http://localhost:8000/health \
+  -H 'Authorization: Bearer dev-secret'
+```
+
+If `API_BEARER_TOKEN` is unset or empty, the API accepts requests without an authorization header. In `/docs`, use the Authorize button when auth is enabled.
+
 ## Endpoints
 
 - `GET /health`
