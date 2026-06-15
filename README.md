@@ -44,6 +44,8 @@ If `API_BEARER_TOKEN` is unset or empty, the API accepts requests without an aut
 - `POST /v2/vectordb/collections/drop`
 - `POST /v2/vectordb/entities/insert`
 - `POST /v2/vectordb/entities/search`
+- `POST /v2/vectordb/entities/query`
+- `POST /v2/vectordb/entities/delete`
 - `POST /indexes`
 - `GET /indexes`
 - `GET /indexes/{name}`
@@ -155,6 +157,56 @@ curl -X POST http://localhost:8000/v2/vectordb/entities/search \
     "outputFields": ["title", "body"]
   }'
 ```
+
+Filter entities by metadata without a vector query using `entities/query`. Each key in `filter` is ANDed; values are matched as strings:
+
+```bash
+curl -X POST http://localhost:8000/v2/vectordb/entities/query \
+  -H 'content-type: application/json' \
+  -d '{
+    "collectionName": "drupal_nodes",
+    "filter": {"drupal_entity_id": ["node:1001:en", "node:1002:en"]},
+    "outputFields": ["title"],
+    "limit": 10
+  }'
+```
+
+An empty `filter` object returns all records up to `limit`.
+
+Delete entities by their integer IDs using an `id in [...]` filter:
+
+```bash
+curl -X POST http://localhost:8000/v2/vectordb/entities/delete \
+  -H 'content-type: application/json' \
+  -d '{
+    "collectionName": "drupal_nodes",
+    "filter": "id in [1001, 1002]"
+  }'
+```
+
+## Testing
+
+The test suite runs inside the container (no local Python installation needed):
+
+```bash
+docker compose run --rm turbovec-api python -m pytest tests/ -v
+```
+
+59 tests cover collections, insert, search, query, delete, bearer auth, and full Drupal end-to-end flows. Tests use FastAPI's `TestClient` with an isolated temporary data directory per test — no live index state is shared between tests.
+
+## Drupal integration
+
+The `ai_vdb_provider_turbovec` Drupal module registers turbovec as a vector database provider in the [Drupal AI module](https://www.drupal.org/project/ai). It lives at `web/modules/custom/ai_vdb_provider_turbovec/` inside your Drupal project.
+
+**Requirements:** Drupal AI module, Key module.
+
+**Enable:**
+```bash
+drush en ai_vdb_provider_turbovec
+drush cr
+```
+
+**Configure:** visit `/admin/config/ai/vdb_providers/turbovec` and set the server URL. From inside a Docker container (e.g. DDEV), use `http://host.docker.internal:8000` to reach turbovec running on the host.
 
 ## Drupal-style node test data
 
