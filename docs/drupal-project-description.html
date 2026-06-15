@@ -1,0 +1,40 @@
+<p>Turbovec VDB Provider integrates <a href="https://github.com/nickopris/turbovec-docker">turbovec-docker</a> — a lightweight, self-hosted vector database — as a Vector Database (VDB) provider for the <a href="https://www.drupal.org/project/ai">Drupal AI module</a>. It enables similarity-based semantic search across your Drupal content using embeddings, with no external cloud dependency.</p>
+
+<p><a href="https://github.com/nickopris/turbovec-docker">turbovec-docker</a> is a Dockerised HTTP API built on top of <a href="https://github.com/RyanCodrai/turbovec">RyanCodrai/turbovec</a>. It wraps turbovec's fast binary quantisation index in a FastAPI service and exposes a REST interface that this module communicates with to store, search, and delete vectors.</p>
+
+<h2>Key Features</h2>
+
+<ul>
+  <li><strong>Semantic vector search</strong> — Plug turbovec into the AI Search backend to power similarity-based content discovery using embeddings from any AI provider supported by the Drupal AI module.</li>
+  <li><strong>Lightweight and self-hosted</strong> — turbovec-docker runs as a single Docker container with no external cloud account required. Data is persisted to local files on the host, making it ideal for development, staging, and small-to-medium production deployments.</li>
+  <li><strong>Full CRUD operations</strong> — Supports creating and dropping collections, inserting entities with arbitrary metadata fields, filtered vector search, metadata-only queries, and entity deletion.</li>
+  <li><strong>Entity ID filtering</strong> — Pass an allowlist of Drupal entity IDs to restrict vector search to a specific set of nodes (e.g. after access-check retries), ensuring results are scoped to content the current user is permitted to see.</li>
+  <li><strong>Offset and pagination support</strong> — Both vector search and metadata query endpoints support <code>limit</code> and <code>offset</code>, allowing the AI Search backend to page through results and apply access-check retries.</li>
+  <li><strong>Optional bearer token authentication</strong> — Set <code>API_BEARER_TOKEN</code> on the turbovec-docker container to require authentication. Store the token securely using the <a href="https://www.drupal.org/project/key">Key module</a> and select it in the provider configuration form.</li>
+  <li><strong>DDEV friendly</strong> — From inside a DDEV container, point the server URL at <code>http://host.docker.internal:8000</code> to reach turbovec running on the host machine without any extra network configuration.</li>
+  <li><strong>Orphan-safe</strong> — The provider guards against corrupted index state (vectors present in the index but missing metadata) that would otherwise crash Drupal's entity access checks.</li>
+</ul>
+
+<h2>Requirements</h2>
+
+<ul>
+  <li><a href="https://www.drupal.org/project/ai">AI module</a> (including the <code>ai_search</code> sub-module)</li>
+  <li><a href="https://www.drupal.org/project/key">Key module</a></li>
+  <li>A running <a href="https://github.com/nickopris/turbovec-docker">turbovec-docker</a> instance (<code>docker compose up --build</code>)</li>
+  <li>Drupal 10.2 or 11</li>
+</ul>
+
+<h2>Getting started</h2>
+
+<p>Start turbovec-docker on the host machine:</p>
+
+<pre><code>docker compose up --build</code></pre>
+
+<p>Enable the module and clear caches:</p>
+
+<pre><code>drush en ai_vdb_provider_turbovec
+drush cr</code></pre>
+
+<p>Visit <strong>/admin/config/ai/vdb_providers/turbovec</strong> and set the server URL (e.g. <code>http://localhost:8000</code> or <code>http://host.docker.internal:8000</code> from inside DDEV). The form tests connectivity on save.</p>
+
+<p>Then create a Search API server using the <strong>AI Search</strong> backend, select <strong>Turbovec</strong> as the VDB provider, enable the <strong>AI Embeddings</strong> processor on your index, and index your content.</p>

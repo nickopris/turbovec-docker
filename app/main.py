@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import threading
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -318,17 +319,21 @@ class IndexRegistry:
 
 
 registry = IndexRegistry()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    registry.load_existing()
+    yield
+
+
 app = FastAPI(
     title="turbovec API",
     summary="A small HTTP service for RyanCodrai/turbovec's IdMapIndex.",
     version="0.1.0",
     dependencies=[Security(require_bearer_token)],
+    lifespan=lifespan,
 )
-
-
-@app.on_event("startup")
-def startup() -> None:
-    registry.load_existing()
 
 
 @app.get("/health")
